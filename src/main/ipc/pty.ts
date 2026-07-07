@@ -3515,6 +3515,17 @@ export function registerPtyHandlers(
       return
     }
     const markedHiddenResizeOutput = rendererPtyIsKnownHidden(args.id)
+    // Why: the host's re-render cascade (tab create, fit-override change) runs
+    // safeFit on ALL panes and emits a full-width pty:resize even for a hidden
+    // background pane. When that PTY is a shared terminal a remote desktop client
+    // is actively viewing, this collateral resize would silently overwrite the
+    // remote viewer's grid — the subprocess then redraws at the wrong width and
+    // strands wrapped tails ("+"-then-switch-back garble). The remote viewer owns
+    // its own size (applied via updateDesktopViewport, a different path), so drop
+    // the host's hidden-pane collateral resize entirely.
+    if (markedHiddenResizeOutput && runtime?.hasActiveRemoteDesktopSubscriber(args.id)) {
+      return
+    }
     if (markedHiddenResizeOutput) {
       // Why: alternate-screen TUIs repaint on SIGWINCH. If that hidden repaint
       // is read after the user switches back, it must not masquerade as live

@@ -18,6 +18,8 @@ import {
 function stubRuntime(overrides: Partial<OrcaRuntimeService> = {}): OrcaRuntimeService {
   return {
     getRuntimeId: () => 'test-runtime',
+    registerRemoteDesktopSubscriber: vi.fn(),
+    unregisterRemoteDesktopSubscriber: vi.fn(),
     ...overrides
   } as OrcaRuntimeService
 }

@@ -2156,6 +2156,16 @@ export class OrcaRuntimeService {
     >
   >()
 
+  // Why: a remote desktop client viewing a host terminal over the multiplex
+  // stream owns that PTY's live size. The host's own re-render cascade runs
+  // safeFit on ALL panes (see resizeSuppressedUntil note) — including the
+  // background tab pane mirroring this shared terminal — and emits a full-width
+  // collateral pty:resize. When that PTY has a live remote desktop subscriber
+  // AND the host's own pane is hidden, that collateral resize must be dropped so
+  // it can't silently overwrite the remote viewer's grid (the "+"-then-switch
+  // garble). Tracks clientIds per ptyId; see the pty:resize guard in pty.ts.
+  private remoteDesktopSubscribersByPty = new Map<string, Set<string>>()
+
   // Why: per-PTY driver state. The "driver" is whoever currently owns the
   // input/resize floor. While `kind === 'mobile'` the desktop renderer drops
   // xterm.onData/onResize and shows the lock banner; `terminal.send` /
@@ -7091,6 +7101,30 @@ export class OrcaRuntimeService {
 
   getDriver(ptyId: string): DriverState {
     return this.currentDriver.get(ptyId) ?? { kind: 'idle' }
+  }
+
+  registerRemoteDesktopSubscriber(ptyId: string, clientId: string): void {
+    let clients = this.remoteDesktopSubscribersByPty.get(ptyId)
+    if (!clients) {
+      clients = new Set<string>()
+      this.remoteDesktopSubscribersByPty.set(ptyId, clients)
+    }
+    clients.add(clientId)
+  }
+
+  unregisterRemoteDesktopSubscriber(ptyId: string, clientId: string): void {
+    const clients = this.remoteDesktopSubscribersByPty.get(ptyId)
+    if (!clients) {
+      return
+    }
+    clients.delete(clientId)
+    if (clients.size === 0) {
+      this.remoteDesktopSubscribersByPty.delete(ptyId)
+    }
+  }
+
+  hasActiveRemoteDesktopSubscriber(ptyId: string): boolean {
+    return (this.remoteDesktopSubscribersByPty.get(ptyId)?.size ?? 0) > 0
   }
 
   private setDriver(ptyId: string, next: DriverState): void {

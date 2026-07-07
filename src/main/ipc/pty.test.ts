@@ -4106,6 +4106,85 @@ describe('registerPtyHandlers', () => {
     })
   })
 
+  describe('pty:resize protects a remote-viewed PTY from the host background-fit cascade', () => {
+    function setupDaemonProvider(resize: (id: string, cols: number, rows: number) => void): void {
+      setLocalPtyProvider({
+        spawn: vi.fn(async (opts: { sessionId?: string }) => ({ id: opts.sessionId ?? 'daemon-pty' })),
+        write: vi.fn(),
+        resize: vi.fn(resize),
+        getAppliedSize: vi.fn(async () => ({ cols: 111, rows: 43 })),
+        kill: vi.fn(),
+        shutdown: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn()),
+        listProcesses: vi.fn(async () => []),
+        getForegroundProcess: vi.fn(async () => null)
+      } as never)
+    }
+    function makeRuntime(hasRemoteDesktopSubscriber: boolean) {
+      return {
+        setPtyController: vi.fn(),
+        createPreAllocatedTerminalHandle: vi.fn(() => null),
+        registerPty: vi.fn(),
+        getDriver: vi.fn(() => ({ kind: 'host' })),
+        isResizeSuppressed: vi.fn(() => false),
+        onPtySpawned: vi.fn(),
+        onPtyExit: vi.fn(),
+        onPtyData: vi.fn(),
+        onExternalPtyResize: vi.fn(),
+        hasActiveRemoteDesktopSubscriber: vi.fn(() => hasRemoteDesktopSubscriber)
+      }
+    }
+    async function spawnHiddenPty(runtime: ReturnType<typeof makeRuntime>): Promise<string> {
+      handlers.clear()
+      registerPtyHandlers(mainWindow as never, runtime as never)
+      const spawn = await handlers.get('pty:spawn')!(null, { cols: 111, rows: 43, env: {} })
+      const id = (spawn as { id: string }).id
+      getPtySetRendererPtyVisibleListener()(null, { id, visible: false })
+      return id
+    }
+
+    it('drops a hidden-pane resize while a remote desktop client is viewing the PTY', async () => {
+      const resize = vi.fn()
+      setupDaemonProvider(resize)
+      const runtime = makeRuntime(true)
+      const id = await spawnHiddenPty(runtime)
+
+      getPtyResizeListener()(mainWindowIpcEvent, { id, cols: 145, rows: 61 })
+
+      expect(runtime.hasActiveRemoteDesktopSubscriber).toHaveBeenCalledWith(id)
+      expect(resize).not.toHaveBeenCalled()
+      expect(runtime.onExternalPtyResize).not.toHaveBeenCalled()
+    })
+
+    it('still applies a hidden-pane resize when no remote desktop client is viewing', async () => {
+      const resize = vi.fn()
+      setupDaemonProvider(resize)
+      const runtime = makeRuntime(false)
+      const id = await spawnHiddenPty(runtime)
+
+      getPtyResizeListener()(mainWindowIpcEvent, { id, cols: 120, rows: 40 })
+
+      expect(resize).toHaveBeenCalledWith(id, 120, 40)
+      expect(runtime.onExternalPtyResize).toHaveBeenCalledWith(id, 120, 40)
+    })
+
+    it('still applies a resize to a visible pane even with a remote desktop client viewing', async () => {
+      const resize = vi.fn()
+      setupDaemonProvider(resize)
+      const runtime = makeRuntime(true)
+      handlers.clear()
+      registerPtyHandlers(mainWindow as never, runtime as never)
+      const spawn = await handlers.get('pty:spawn')!(null, { cols: 111, rows: 43, env: {} })
+      const id = (spawn as { id: string }).id
+      getPtySetRendererPtyVisibleListener()(null, { id, visible: true })
+
+      getPtyResizeListener()(mainWindowIpcEvent, { id, cols: 130, rows: 50 })
+
+      expect(resize).toHaveBeenCalledWith(id, 130, 50)
+    })
+  })
+
   it('injects ORCA_TERMINAL_HANDLE for non-local PTY providers', async () => {
     const spawn = vi.fn(async () => ({ id: 'remote-pty' }))
     registerSshPtyProvider('ssh-1', {

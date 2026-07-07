@@ -55,6 +55,7 @@ type SnapshotFrameOptions = {
   truncatedByByteBudget?: boolean
   source?: 'headless' | 'renderer'
   oscLinks?: TerminalOscLinkRange[]
+  alternateScreen?: boolean
 }
 
 type SerializedSnapshot = {
@@ -67,6 +68,7 @@ type SerializedSnapshot = {
   oscLinks?: TerminalOscLinkRange[]
   scrollbackRows: number
   truncatedByByteBudget: boolean
+  alternateScreen?: boolean
 } | null
 
 type TerminalViewportClient = {
@@ -467,7 +469,12 @@ function sendSnapshotFrames(
       source: options.source,
       oscLinks: options.oscLinks,
       truncated: options.truncated === true,
-      truncatedByByteBudget: options.truncatedByByteBudget === true
+      truncatedByByteBudget: options.truncatedByByteBudget === true,
+      // Why: the desktop hidden-output restore must clear the alternate screen
+      // (?1049h) rather than wipe the normal buffer; without this flag on the
+      // wire the renderer defaults to the normal-buffer clear and the daemon's
+      // cursor-positioned frame strands into a garbled alt-screen TUI.
+      alternateScreen: options.alternateScreen === true
     })
   )
   let chunks = 0
@@ -1267,6 +1274,8 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         stream.exitWaiterAbort.abort()
         if (stream.isMobile && stream.client?.id) {
           runtime.handleMobileUnsubscribe(stream.ptyId, stream.client.id)
+        } else if (!stream.isMobile && stream.client?.id) {
+          runtime.unregisterRemoteDesktopSubscriber(stream.ptyId, stream.client.id)
         }
         if (emitEnd) {
           emit({ type: 'end', streamId })
@@ -1400,6 +1409,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             oscLinks: serialized?.oscLinks,
             truncated: false,
             truncatedByByteBudget: serialized?.truncatedByByteBudget,
+            alternateScreen: serialized?.alternateScreen,
             data: serialized?.data ?? ''
           })
         } catch (error) {
@@ -1485,6 +1495,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           exitWaiterAbort: new AbortController()
         }
         streams.set(request.streamId, stream)
+        // Why: mark this host PTY as viewed by a live remote desktop client so
+        // the host's own background-pane safeFit cascade can't overwrite the
+        // viewer's grid via a collateral pty:resize (see the pty:resize guard).
+        if (!isMobile && request.client?.id) {
+          runtime.registerRemoteDesktopSubscriber(ptyId, request.client.id)
+        }
         stream.unregisterBinaryHandler = registerBinaryStreamHandler(request.streamId, (frame) =>
           handleSlotFrame(stream, frame)
         )
@@ -1602,6 +1618,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             truncatedByByteBudget: serialized?.truncatedByByteBudget,
             source: serialized?.source,
             oscLinks: serialized?.oscLinks,
+            alternateScreen: serialized?.alternateScreen,
             data: serialized?.data ?? (read.tail.length > 0 ? `${read.tail.join('\r\n')}\r\n` : '')
           })
           // Why: baseline for resize re-stream gating; the client already

@@ -62,6 +62,7 @@ export type RemoteRuntimeMultiplexedTerminal = {
     rows: number
     seq?: number
     source?: 'headless' | 'renderer'
+    alternateScreen?: boolean
   } | null>
   close: () => void
 }
@@ -86,6 +87,7 @@ type RemoteRuntimeSnapshotInfo = {
   source?: 'headless' | 'renderer'
   requestId?: number
   truncated?: boolean
+  alternateScreen?: boolean
 }
 
 type RemoteRuntimeSnapshotRequest = {
@@ -97,6 +99,7 @@ type RemoteRuntimeSnapshotRequest = {
       rows: number
       seq?: number
       source?: 'headless' | 'renderer'
+      alternateScreen?: boolean
     } | null
   ) => void
   reject: (error: Error) => void
@@ -381,7 +384,8 @@ class RemoteRuntimeTerminalMultiplexer {
             cols: info?.cols ?? 80,
             rows: info?.rows ?? 24,
             seq: info?.seq,
-            source: info?.source
+            source: info?.source,
+            alternateScreen: info?.alternateScreen
           })
           clearPendingSnapshotRequest(stream)
         } else if (target === 'initial') {
@@ -608,6 +612,7 @@ function decodeSnapshotInfo(
     source?: unknown
     requestId?: unknown
     truncated?: unknown
+    alternateScreen?: unknown
   }>(payload)
   if (!raw) {
     return null
@@ -618,7 +623,8 @@ function decodeSnapshotInfo(
     seq: typeof raw.seq === 'number' ? raw.seq : undefined,
     source: raw.source === 'headless' || raw.source === 'renderer' ? raw.source : undefined,
     requestId: typeof raw.requestId === 'number' ? raw.requestId : undefined,
-    truncated: raw.truncated === true
+    truncated: raw.truncated === true,
+    alternateScreen: raw.alternateScreen === true
   }
 }
 
