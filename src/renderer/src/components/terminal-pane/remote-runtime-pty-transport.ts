@@ -47,7 +47,11 @@ function isRemoteTerminalGoneMessage(message: string): boolean {
     message.includes('terminal_handle_stale') ||
     message.includes('terminal_exited') ||
     message.includes('terminal_gone') ||
-    message.includes('no_connected_pty')
+    message.includes('no_connected_pty') ||
+    // Why: an intentionally-killed session's tombstone (TerminalKilledError,
+    // "...was explicitly killed") is benign on reattach — retire the pane quietly
+    // instead of raising the red file-an-issue toast, mirroring pty-transport.ts (#9352).
+    message.includes('was explicitly killed')
   )
 }
 
