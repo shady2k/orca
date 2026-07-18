@@ -90,6 +90,23 @@ const latestSessionTabsSnapshotByWorktree = new Map<string, SnapshotFreshness>()
 const lastHostTerminalTabCountByWorktree = new Map<string, number>()
 const hostSessionTabIdByLocalKey = new Map<string, string>()
 
+// Why (#9352): the host publishes an exited terminal indistinguishably from a
+// still-starting one — both are status:'pending-handle', terminal:null. A live
+// terminal gets a handle within ~1s; a dead one never does, so paired viewers
+// accumulate un-closable phantom tabs. Track how long each mirror group has gone
+// without any ready surface; past the grace window it is treated as a dead pane
+// and pruned. Grace-based so a host-reconnect blip can't briefly hide live tabs.
+const MIRROR_TERMINAL_PENDING_GRACE_MS = 25_000
+const mirrorTerminalPendingSinceByKey = new Map<string, number>()
+
+function mirrorTerminalPendingKey(
+  environmentId: string,
+  worktreeId: string,
+  parentTabId: string
+): string {
+  return `${environmentId}::${worktreeId}::${parentTabId}`
+}
+
 type TerminalSurface = RuntimeMobileSessionTerminalClientTab
 type ReadyTerminalSurface = RuntimeMobileSessionTerminalClientTab & { status: 'ready' }
 type ReadyBrowserSurface = RuntimeMobileSessionBrowserTab & { browserPageId: string }
@@ -300,6 +317,7 @@ export function resetWebSessionTabsSnapshotFreshnessForTests(): void {
   latestSessionTabsSnapshotByWorktree.clear()
   lastHostTerminalTabCountByWorktree.clear()
   hostSessionTabIdByLocalKey.clear()
+  mirrorTerminalPendingSinceByKey.clear()
 }
 
 export function _getWebSessionTabsTrackingCountsForTest(): {
@@ -379,6 +397,53 @@ function isTerminalSurfaceTab(
   tab: RuntimeMobileSessionTabsResult['tabs'][number]
 ): tab is TerminalSurface {
   return tab.type === 'terminal'
+}
+
+/**
+ * Returns the set of mirror-group parentTabIds that have stayed handle-less past
+ * the grace window — dead panes the host keeps republishing (#9352). A group with
+ * any ready surface resets/clears its timer, so a still-starting terminal (which
+ * readies within ~1s) is never pruned; only a zombie that never gets a handle is.
+ */
+function findExpiredPendingMirrorTerminalParents(
+  environmentId: string,
+  worktreeId: string,
+  terminalSurfaceTabs: readonly TerminalSurface[],
+  now: number
+): Set<string> {
+  const hasReadyByParent = new Map<string, boolean>()
+  for (const tab of terminalSurfaceTabs) {
+    const prev = hasReadyByParent.get(tab.parentTabId) ?? false
+    hasReadyByParent.set(tab.parentTabId, prev || isReadyTerminalTab(tab))
+  }
+  const expired = new Set<string>()
+  const seenKeys = new Set<string>()
+  for (const [parentTabId, hasReady] of hasReadyByParent) {
+    const key = mirrorTerminalPendingKey(environmentId, worktreeId, parentTabId)
+    seenKeys.add(key)
+    if (hasReady) {
+      mirrorTerminalPendingSinceByKey.delete(key)
+      continue
+    }
+    const since = mirrorTerminalPendingSinceByKey.get(key)
+    if (since === undefined) {
+      mirrorTerminalPendingSinceByKey.set(key, now)
+      continue
+    }
+    if (now - since > MIRROR_TERMINAL_PENDING_GRACE_MS) {
+      expired.add(parentTabId)
+    }
+  }
+  // Why: forget groups the host no longer publishes so a reused id restarts its
+  // grace window instead of being pruned instantly by a stale timestamp. Deleting
+  // during Map.keys() iteration is safe — already-yielded keys aren't revisited.
+  const prefix = `${environmentId}::${worktreeId}::`
+  for (const key of mirrorTerminalPendingSinceByKey.keys()) {
+    if (key.startsWith(prefix) && !seenKeys.has(key)) {
+      mirrorTerminalPendingSinceByKey.delete(key)
+    }
+  }
+  return expired
 }
 
 function isReadyBrowserTab(
@@ -1721,7 +1786,30 @@ export function applyWebSessionTabsSnapshot(
   }
   const currentTerminalTabs = state.tabsByWorktree[worktreeId] ?? []
   const existingTerminalById = new Map(currentTerminalTabs.map((tab) => [tab.id, tab]))
-  const terminalSurfaceTabs = snapshot.tabs.filter(isTerminalSurfaceTab)
+  const allTerminalSurfaceTabs = snapshot.tabs.filter(isTerminalSurfaceTab)
+  // Why (#9352): drop mirror groups the host keeps republishing with no live
+  // handle past the grace window — dead panes it can't distinguish from starting
+  // ones. Pruning the surfaces here removes the phantom tab (mirrors are always
+  // rebuilt from the snapshot) without touching host state.
+  const expiredMirrorParentTabIds = findExpiredPendingMirrorTerminalParents(
+    environmentId,
+    worktreeId,
+    allTerminalSurfaceTabs,
+    now
+  )
+  const terminalSurfaceTabs =
+    expiredMirrorParentTabIds.size > 0
+      ? allTerminalSurfaceTabs.filter((tab) => !expiredMirrorParentTabIds.has(tab.parentTabId))
+      : allTerminalSurfaceTabs
+  const terminalPrunedSnapshot: RuntimeMobileSessionTabsResult =
+    expiredMirrorParentTabIds.size > 0
+      ? {
+          ...snapshot,
+          tabs: snapshot.tabs.filter(
+            (tab) => !(isTerminalSurfaceTab(tab) && expiredMirrorParentTabIds.has(tab.parentTabId))
+          )
+        }
+      : snapshot
   const readyTerminalTabs = terminalSurfaceTabs.filter(isReadyTerminalTab)
   const nextRemotePtyIds = new Set(
     readyTerminalTabs.map((tab) => toRemoteRuntimePtyId(tab.terminal, environmentId))
@@ -1745,7 +1833,7 @@ export function applyWebSessionTabsSnapshot(
       )
   )
   const mirroredTerminalTabs = buildMirroredTerminalTabs(
-    snapshot,
+    terminalPrunedSnapshot,
     environmentId,
     existingTerminalById,
     state.terminalLayoutsByTabId,

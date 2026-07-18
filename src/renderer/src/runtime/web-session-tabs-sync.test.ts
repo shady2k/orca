@@ -778,6 +778,51 @@ describe('applyWebSessionTabsSnapshot', () => {
     expect(patch.tabsByWorktree?.[WT]?.some((tab) => tab.id === 'local-claude-tab')).toBe(true)
   })
 
+  it('prunes a mirror terminal that stays handle-less past the grace window (#9352)', () => {
+    const deadSurface = {
+      type: 'terminal' as const,
+      id: `dead-tab::${LEAF_ID}`,
+      title: 'Terminal',
+      parentTabId: 'dead-tab',
+      leafId: LEAF_ID,
+      isActive: false,
+      status: 'pending-handle' as const,
+      terminal: null
+    }
+    const liveSurface = {
+      type: 'terminal' as const,
+      id: `live-tab::${SECOND_LEAF_ID}`,
+      title: 'zsh',
+      parentTabId: 'live-tab',
+      leafId: SECOND_LEAF_ID,
+      isActive: true,
+      status: 'ready' as const,
+      terminal: 'terminal-live'
+    }
+    const snapshot = makeSnapshot([deadSurface, liveSurface])
+
+    // First apply: the dead surface is still inside the grace window, so both
+    // mirror tabs materialize (a just-created terminal must not be hidden).
+    const first = applyWebSessionTabsSnapshot(
+      makeState(),
+      snapshot,
+      ENV,
+      NOW
+    ) as Partial<WebSessionTabsSyncState>
+    expect(first.tabsByWorktree?.[WT]).toHaveLength(2)
+
+    // A later snapshot past the grace window: the still-handle-less dead pane is
+    // pruned; the live one stays.
+    const later = applyWebSessionTabsSnapshot(
+      makeState({ tabsByWorktree: { [WT]: first.tabsByWorktree?.[WT] ?? [] } }),
+      { ...snapshot, snapshotVersion: 2 },
+      ENV,
+      NOW + 25_001
+    ) as Partial<WebSessionTabsSyncState>
+    expect(later.tabsByWorktree?.[WT]).toHaveLength(1)
+    expect(later.tabsByWorktree?.[WT]?.[0]?.title).toBe('zsh')
+  })
+
   it('hydrates ready host terminal surfaces as remote runtime terminal tabs', () => {
     const patch = applyWebSessionTabsSnapshot(
       makeState(),
